@@ -1,22 +1,21 @@
+use clap::Parser;
 use srtlib::{Subtitles, Timestamp};
 
-pub struct Config {
-    input_file: String,
-    output_file: String,
-}
+#[derive(Parser, Debug)]
+pub struct Cli {
+    /// Input subtitles file
+    input: String,
 
-impl Config {
-    pub fn build(args: &[String]) -> Result<Config, &str> {
-        if args.len() < 3 {
-            return Err("not enough arguments");
-        }
-        let input_file = args[1].clone();
-        let output_file = args[2].clone();
-        Ok(Config {
-            input_file,
-            output_file,
-        })
-    }
+    /// Output subtitles file
+    output: String,
+
+    /// First timestamp
+    #[arg(short, long)]
+    first: String,
+
+    /// Last timestamp
+    #[arg(short, long)]
+    last: String,
 }
 
 trait TimestampExt {
@@ -33,17 +32,14 @@ impl TimestampExt for Timestamp {
     }
 }
 
-pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Input file: {}", config.input_file);
-    println!("Output file: {}", config.output_file);
+pub fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Input file: {}", cli.input);
+    println!("Output file: {}", cli.output);
 
-    let subs = Subtitles::parse_from_file(&config.input_file, None)?;
+    let subs = Subtitles::parse_from_file(&cli.input, None)?;
 
     for s in subs {
-        println!(
-            "ts: {} --> {} ms",
-            s.start_time, s.start_time.to_ms(),
-        );
+        println!("ts: {} --> {} ms", s.start_time, s.start_time.to_ms(),);
     }
 
     Ok(())
