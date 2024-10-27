@@ -1,7 +1,8 @@
-use std::env;
-
+use anyhow::{bail, Result};
 use clap::Parser;
 use srtlib::{Subtitles, Timestamp};
+use tracing::{info, trace};
+use std::env;
 
 #[derive(Parser, Debug)]
 pub struct Cli {
@@ -18,8 +19,14 @@ pub struct Cli {
     /// Last timestamp formatted as hh:mm:ss:ms
     #[arg(short, long)]
     last: String,
+
+    /// log level
+    #[arg(long = "log")]
+    #[arg(default_value = "info")]
+    pub log_level: String,
 }
 
+#[allow(dead_code)]
 trait TimestampExt {
     fn to_ms(&self) -> u64;
     fn from_ms(ms: u64) -> Timestamp;
@@ -43,10 +50,10 @@ impl TimestampExt for Timestamp {
     }
 }
 
-fn ts_arg_to_ms(ts: &str) -> Result<u64, Box<dyn std::error::Error>> {
+fn ts_arg_to_ms(ts: &str) -> Result<u64> {
     let parts: Vec<&str> = ts.split(':').collect();
     if parts.len() != 4 {
-        return Err("Invalid timestamp format".into());
+        bail!("Invalid timestamp format");
     }
     let hours = parts[0].parse::<u8>()?;
     let minutes = parts[1].parse::<u8>()?;
@@ -55,43 +62,49 @@ fn ts_arg_to_ms(ts: &str) -> Result<u64, Box<dyn std::error::Error>> {
     Ok(Timestamp::new(hours, minutes, seconds, milliseconds).to_ms())
 }
 
-fn apply_offset(subs: &mut Subtitles, offset: i32) {
+fn apply_offset(subs: &mut Subtitles, offset: u64) {
     subs.into_iter()
-        .for_each(|sub| sub.add_milliseconds(offset));
+        .for_each(|sub| {
+            let prev_ts = sub.start_time;
+            sub.add_milliseconds(offset as i32);
+            trace!(?prev_ts, new_ts = ?sub.start_time, "Applying ratio");
+        });
 }
 
-fn apply_ratio(subs: &mut Subtitles, ratio_num: u64, ratio_den: u64) {
+fn apply_ratio(subs: &mut Subtitles, first_ts_ms: u64, duration_ms: u64, target_duration_ms: u64) {
     subs.into_iter().for_each(|sub| {
-        sub.start_time = Timestamp::from_ms(sub.start_time.to_ms() * ratio_num / ratio_den);
-        sub.end_time = Timestamp::from_ms(sub.end_time.to_ms() * ratio_num / ratio_den);
+        let prev_ts = sub.start_time;
+        let mut to_add = prev_ts.to_ms() as f64 - first_ts_ms as f64;
+        to_add *= (target_duration_ms as f64) / (duration_ms as f64) - 1.0;
+        sub.add_milliseconds(to_add as i32);
+        trace!(?prev_ts, new_ts = ?sub.start_time, "Applying ratio");
     });
 }
 
-pub fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
-    println!(
+pub fn run(cli: Cli) -> Result<()> {
+    info!(
         "{}: extrapoling subtiles '{}' -> '{}'",
         env::args().next().unwrap_or_default(),
         cli.input,
         cli.output
     );
 
-    let mut subs = Subtitles::parse_from_file(&cli.input, None)?;
+    let mut subs = Subtitles::parse_from_file(&cli.input, Some("iso-8859-2"))?;
+    let first = subs[0].start_time.to_ms();
     let duration = subs[subs.len() - 1].start_time.to_ms() - subs[0].start_time.to_ms();
-    let first = subs[0].start_time.to_ms() as i32;
 
-    let target_first = ts_arg_to_ms(&cli.first)? as i32;
-    let target_last = ts_arg_to_ms(&cli.last)? as i32;
+    let target_first = ts_arg_to_ms(&cli.first)?;
+    let target_last = ts_arg_to_ms(&cli.last)?;
+    let target_duration = target_last - target_first;
 
-    println!("Applying offset: {}ms", target_first - first);
-    println!(
-        "Applying ratio: {}",
-        (target_last - target_first) as f64 / duration as f64
-    );
+    let offset = target_first - first;
+    info!("Applying offset: {}ms", offset);
+    apply_offset(&mut subs, offset);
 
-    apply_offset(&mut subs, target_first - first);
-    apply_ratio(&mut subs, (target_last - target_first) as u64, duration);
+    info!("Applying ratio");
+    apply_ratio(&mut subs, first, duration, target_duration);
 
-    println!("Writing to file: {}", cli.output);
+    info!("Writing to file: {}", cli.output);
     subs.write_to_file(&cli.output, None)?;
 
     Ok(())
@@ -210,16 +223,18 @@ mod test {
                 String::new(),
             ),
         ]);
-        apply_ratio(&mut subs, 2, 1);
+        let first = subs[0].start_time.to_ms();
+        let duration = subs[subs.len() - 1].start_time.to_ms() - subs[0].start_time.to_ms();
+        apply_ratio(&mut subs, first, duration, duration * 2);
         assert_eq!(subs[0].start_time.to_ms(), 0);
-        assert_eq!(subs[0].end_time.to_ms(), 1000);
+        assert_eq!(subs[0].end_time.to_ms(), 500);
         assert_eq!(subs[1].start_time.to_ms(), 2000);
-        assert_eq!(subs[1].end_time.to_ms(), 3000);
-        assert_eq!(subs[2].start_time.to_ms(), 6000);
-        assert_eq!(subs[2].end_time.to_ms(), 7000);
-        assert_eq!(subs[3].start_time.to_ms(), 8000);
-        assert_eq!(subs[3].end_time.to_ms(), 9000);
-        assert_eq!(subs[4].start_time.to_ms(), 18000);
-        assert_eq!(subs[4].end_time.to_ms(), 19000);
+        assert_eq!(subs[1].end_time.to_ms(), 2500);
+        assert_eq!(subs[2].start_time.to_ms(), 124_000);
+        assert_eq!(subs[2].end_time.to_ms(), 124_500);
+        assert_eq!(subs[3].start_time.to_ms(), 126_000);
+        assert_eq!(subs[3].end_time.to_ms(), 126_500);
+        assert_eq!(subs[4].start_time.to_ms(), 14_768_000);
+        assert_eq!(subs[4].end_time.to_ms(), 14_768_500);
     }
 }
